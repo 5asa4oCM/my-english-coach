@@ -8,6 +8,12 @@ from gtts import gTTS
 import io
 from openai import OpenAI
 
+# 尝试安全导入 docx，防止缺失库时直接崩溃
+try:
+    import docx
+except ImportError:
+    docx = None
+
 # 配置文件路径
 VOCAB_FILE = "vocab_db.json"
 HISTORY_FILE = "quiz_history.json"
@@ -26,7 +32,7 @@ def generate_readme_if_not_exists():
    - 您的核心词库资产！包含所有导入的生词、例句和自适应权重分配。
 
 2. oral_db.json
-   - 【新增】您的口语卡片库！保存了由播客/美剧文本智能转换而来的“场景-口语”闪卡。
+   - 您的口语卡片库！保存了由播客/美剧文本、PDF、Word 智能转换而来的“场景-口语”闪卡。
 
 3. quiz_history.json
    - 您的翻译训练足迹与AI精细纠错历史。
@@ -34,7 +40,7 @@ def generate_readme_if_not_exists():
 4. app.py
    - 系统的运行引擎。升级时只需替换此文件内容。
 
-【云端 iPhone 使用特别提醒】
+【云端/移动端异地 iPhone 使用特别提醒】
 由于 Streamlit Cloud 云服务器定期重启，请在每次训练结束后，在「笔记管理」页：
 - 点击下载备份您的 vocab_db.json、oral_db.json 和 quiz_history.json。
 - 下次开始学习前，重新上传恢复即可。
@@ -46,9 +52,8 @@ def generate_readme_if_not_exists():
 
 generate_readme_if_not_exists()
 
-# ==================== 2. 数据库迁移与初始化 ====================
+# ==================== 2. 数据库兼容与初始化 ====================
 def migrate_db():
-    # 词汇库初始化与迁移
     if not os.path.exists(VOCAB_FILE):
         with open(VOCAB_FILE, "w", encoding="utf-8") as f:
             json.dump({"vocab_list": []}, f, ensure_ascii=False, indent=4)
@@ -75,19 +80,17 @@ def migrate_db():
         except Exception as e:
             pass
 
-    # 【新增】口语库初始化
     if not os.path.exists(ORAL_FILE):
         with open(ORAL_FILE, "w", encoding="utf-8") as f:
             json.dump({"cards": []}, f, ensure_ascii=False, indent=4)
 
-    # 历史记录初始化
     if not os.path.exists(HISTORY_FILE):
         with open(HISTORY_FILE, "w", encoding="utf-8") as f:
             json.dump([], f, ensure_ascii=False, indent=4)
 
 migrate_db()
 
-# ==================== 3. 核心数据读写函数 ====================
+# ==================== 3. 核心数据读写与解析函数 ====================
 def load_vocab():
     with open(VOCAB_FILE, "r", encoding="utf-8") as f:
         return json.load(f).get("vocab_list", [])
@@ -114,7 +117,25 @@ def save_history(history_item):
     with open(HISTORY_FILE, "w", encoding="utf-8") as f:
         json.dump(history, f, ensure_ascii=False, indent=4)
 
-# ==================== 4. 辅助算法 ====================
+# 自动解析 PDF 文本
+def extract_text_from_pdf(file_obj):
+    reader = PdfReader(file_obj)
+    text = ""
+    for page in reader.pages:
+        text += page.extract_text() or ""
+    return text
+
+# 自动解析 Word 文本
+def extract_text_from_docx(file_obj):
+    if docx is None:
+        raise ImportError("检测到本地未安装 python-docx 模块。请在 CMD 运行: pip install python-docx 并在本地重启")
+    doc = docx.Document(file_obj)
+    fullText = []
+    for para in doc.paragraphs:
+        fullText.append(para.text)
+    return '\n'.join(fullText)
+
+# ==================== 4. 自适应新词优先调度算法 ====================
 def get_adaptive_sample(vocab_list, k=2):
     if not vocab_list:
         return []
@@ -176,10 +197,9 @@ def generate_audio(text, lang='en'):
     except Exception as e:
         return None
 
-# ==================== 5. Streamlit App 主页面 ====================
-st.set_page_config(page_title="自适应口语与翻译看板", page_icon="🗣️", layout="centered")
+# ==================== 5. Streamlit UI 渲染 ====================
+st.set_page_config(page_title="自适应英语口语与翻译看板", page_icon="🗣️", layout="centered")
 
-# 侧边栏配置
 st.sidebar.title("⚙️ 系统设置")
 api_key = st.sidebar.text_input("API Key", type="password", value=st.session_state.get("api_key", ""))
 base_url = st.sidebar.text_input("API Base URL", value="https://api.openai.com/v1")
@@ -196,7 +216,6 @@ def get_llm_client():
         return None
     return OpenAI(api_key=st.session_state["api_key"], base_url=st.session_state["base_url"])
 
-# 初始化 Session State
 if "current_quiz" not in st.session_state:
     st.session_state.current_quiz = None
 if "evaluation_text" not in st.session_state:
@@ -292,7 +311,7 @@ with tab_quiz:
 
                 ### 2. 母语者地道写法
                 *   **书面/学术写法 (Written Style)**: [地道的写作、演讲或书面语写法]
-                *   **口语/日常表达 (Spoken Style)**: [母语者在日常高频使用的、非常地道的口语表达]
+                *   **口语/日常表达 (Spoken Style)**: [母语者日常高频使用的、地道口语表达]
 
                 ### 3. 语言点精讲
                 [讲解以上句子中考查词汇的应用方法，以及核心搭配。]
@@ -343,19 +362,17 @@ with tab_quiz:
                     if audio_stream:
                         st.audio(audio_stream, format="audio/mp3")
 
-# ==================== 【全新核心】Tab 2: 口语召回 ====================
+# ==================== Tab 2: 口语召回 ====================
 with tab_oral:
     st.subheader("🗣️ 3秒即兴口语闪卡测试（Active Retrieval）")
     oral_cards = load_oral()
-    
     st.caption("基于“意音绑定”理论。工具将向您呈现“抽象的中文生活场景”，不进行文字翻译，逼迫您的大脑在 3 秒内直接脑内投影画面，并以微声或对口型的方式脱口而出对应的地道短语和英文整句。")
     
-    # 场景挑战区
     col_gen_card, col_clear_card = st.columns([1, 1])
     with col_gen_card:
         if st.button("🎲 生成随机口语场景", use_container_width=True, type="primary"):
             if not oral_cards:
-                st.warning("口语库为空，请先在下方粘贴播客文本进行智能生成。")
+                st.warning("口语库为空，请先在下方导入播客文本或文档进行生成。")
             else:
                 st.session_state.active_oral_card = random.choice(oral_cards)
                 st.session_state.show_oral_answer = False
@@ -368,7 +385,6 @@ with tab_oral:
             st.success("已清空口语库！")
             st.rerun()
 
-    # 呈现题目
     if st.session_state.active_oral_card:
         st.markdown("---")
         st.markdown("#### 🚨 场景线索（限时3秒，切勿在心中翻译中文）：")
@@ -379,7 +395,6 @@ with tab_oral:
         with col_show_ans:
             if st.button("👀 显示地道英文标准答案", use_container_width=True):
                 st.session_state.show_oral_answer = True
-                
         with col_next_card:
             if st.button("⏭️ 下一个场景", use_container_width=True):
                 st.session_state.active_oral_card = random.choice(oral_cards)
@@ -391,22 +406,47 @@ with tab_oral:
             st.success(f"**核心语块：** `{st.session_state.active_oral_card['phrase']}`")
             st.markdown(f"**地道口语原句：** \n> {st.session_state.active_oral_card['full_sentence']}")
             
-            # 自动播放口语发音
-            st.markdown("##### 🎧 自动生成标准原声跟读（Echo练习）：")
+            st.markdown("##### 🎧 标准原声跟读（Echo练习）：")
             ans_audio = generate_audio(st.session_state.active_oral_card['full_sentence'])
             if ans_audio:
                 st.audio(ans_audio, format="audio/mp3")
 
     st.markdown("---")
     
-    # 录入新播客材料区域
-    st.write("##### 📥 智能导入播客 / 美剧台词 / 文本")
-    podcast_input = st.text_area("请在这里粘贴您要学习的播客台词本、美剧原文片段（限1500字内）：", height=150, placeholder="例如：粘贴一段 6 Minutes English 或 TBBT 的原文文本...")
+    # 【多模态智能导入重构】：支持手动输入、PDF以及Word
+    st.write("##### 📥 多功能智能素材导入（支持输入、PDF、Word）")
+    st.caption("您可以复制粘贴文本，或直接上传 PDF / Word (.docx) / TXT 文档作为口语卡片的提取素材 [1]。")
     
+    import_mode = st.radio("选择导入载体", ["手动输入/粘贴文本", "上传本地文档 (PDF/Word/TXT)"], horizontal=True)
+    
+    raw_podcast_text = ""
+    
+    if import_mode == "手动输入/粘贴文本":
+        raw_podcast_text = st.text_area("请在这里粘贴您要学习的播客台词本或美剧台词原文：", height=150, placeholder="在此粘贴文本内容...")
+    else:
+        uploaded_doc = st.file_uploader("点击或拖拽上传台词文件 (支持 .pdf, .docx, .txt)", type=["pdf", "docx", "txt"])
+        if uploaded_doc is not None:
+            with st.spinner("正在提取文档内容..."):
+                try:
+                    file_extension = uploaded_doc.name.split(".")[-1].lower()
+                    if file_extension == "pdf":
+                        raw_podcast_text = extract_text_from_pdf(uploaded_doc)
+                    elif file_extension == "docx":
+                        raw_podcast_text = extract_text_from_docx(uploaded_doc)
+                    elif file_extension == "txt":
+                        raw_podcast_text = str(uploaded_doc.read(), "utf-8")
+                    
+                    if raw_podcast_text.strip():
+                        st.success(f"📂 成功读取文档！共提取到 {len(raw_podcast_text)} 个字符。已准备好进行AI智能提炼。")
+                    else:
+                        st.error("未能提取到有效字符，请检查文件是否为空或纯扫描版。")
+                except Exception as e:
+                    st.error(f"提取文件内容失败: {e}")
+                    
     if st.button("✨ 智能提取并生成场景口语卡片", use_container_width=True):
         client = get_llm_client()
-        if not podcast_input.strip():
-            st.warning("请输入文本后再点击提取。")
+        if not raw_podcast_text.strip():
+            st.warning("当前没有有效文本，请先输入内容或成功上传文件。")
         elif client:
             with st.spinner("AI 正在提炼核心语料，并为您定制『抽象场景线索』..."):
                 extract_prompt = """
@@ -425,7 +465,7 @@ with tab_oral:
                 }
                 
                 待提炼的原文文本：
-                """ + podcast_input[:3000]
+                """ + raw_podcast_text[:2800]
                 
                 try:
                     response = client.chat.completions.create(
@@ -439,7 +479,6 @@ with tab_oral:
                     
                     if new_cards:
                         existing_cards = load_oral()
-                        # 根据短语本身去重
                         existing_phrases = {c["phrase"].lower() for c in existing_cards}
                         added_count = 0
                         for card in new_cards:
@@ -447,10 +486,10 @@ with tab_oral:
                                 existing_cards.append(card)
                                 added_count += 1
                         save_oral(existing_cards)
-                        st.success(f"🎉 提取成功！新增了 {added_count} 个具有场景画面感的口语卡片，已归档入您的口语库！")
+                        st.success(f"🎉 智能导入成功！新增了 {added_count} 个极具画面感的口语召回卡片！")
                         st.rerun()
                     else:
-                        st.error("未能提取到有效的口语卡片，请检查文本。")
+                        st.error("未能提炼出卡片，请尝试更换文档文本内容。")
                 except Exception as e:
                     st.error(f"提取失败，原因: {e}")
 
@@ -460,7 +499,7 @@ with tab_manage:
     
     # 1. PDF 导入
     st.write("##### 1. 导入 PDF 笔记")
-    uploaded_file = st.file_uploader("选择 PDF 格式个人笔记导入翻译词汇库", type=["pdf"])
+    uploaded_file = st.file_uploader("选择 PDF 格式个人笔记导入翻译词汇库", type=["pdf"], key="manage_pdf")
     
     if uploaded_file is not None:
         if st.button("智能提取并标记新词", use_container_width=True):
@@ -553,7 +592,7 @@ with tab_manage:
 
     st.markdown("---")
     
-    # 3. 💾 云端备份功能（【全新升级】支持 3 个核心数据库的备份与恢复）
+    # 3. 云端备份
     st.write("##### 3. 💾 云端数据备份与恢复 (异地 iPhone 使用必看)")
     st.caption("因为 Streamlit 云端服务器会定期重启，为防进度丢失，请随时在此下载备份，重新打开网页时上传恢复。")
     
@@ -573,7 +612,7 @@ with tab_manage:
         
     st.markdown("⬇️ **上传恢复区域**")
     
-    up_vocab = st.file_uploader("📤 恢复翻译词汇库 (vocab_db.json)", type=["json"])
+    up_vocab = st.file_uploader("📤 恢复翻译词汇库 (vocab_db.json)", type=["json"], key="restore_vocab")
     if up_vocab is not None:
         if st.button("确认恢复词汇库", use_container_width=True):
             try:
@@ -585,7 +624,7 @@ with tab_manage:
             except Exception as e:
                 st.error(f"恢复失败: {e}")
 
-    up_oral = st.file_uploader("📤 恢复口语闪卡库 (oral_db.json)", type=["json"])
+    up_oral = st.file_uploader("📤 恢复口语闪卡库 (oral_db.json)", type=["json"], key="restore_oral")
     if up_oral is not None:
         if st.button("确认恢复口语闪卡库", use_container_width=True):
             try:
@@ -597,7 +636,7 @@ with tab_manage:
             except Exception as e:
                 st.error(f"恢复失败: {e}")
 
-    up_hist = st.file_uploader("📤 恢复翻译历史足迹 (quiz_history.json)", type=["json"])
+    up_hist = st.file_uploader("📤 恢复翻译历史足迹 (quiz_history.json)", type=["json"], key="restore_hist")
     if up_hist is not None:
         if st.button("确认恢复翻译历史足迹", use_container_width=True):
             try:
