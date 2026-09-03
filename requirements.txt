@@ -2,3 +2,9 @@ streamlit
 pypdf
 gtts
 openai
+streamlit
+pypdf
+gtts
+openai
+python-docx
+supabase
