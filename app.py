@@ -1,190 +1,44 @@
 import streamlit as st
-import json
-import os
 import random
 import re
-from pypdf import PdfReader
-from gtts import gTTS
 import io
+import json
+from gtts import gTTS
 from openai import OpenAI
+from supabase import create_client, Client
+from pypdf import PdfReader
 
-# 尝试安全导入 docx，防止缺失库时直接崩溃
 try:
     import docx
 except ImportError:
     docx = None
 
-# 配置文件路径
-VOCAB_FILE = "vocab_db.json"
-HISTORY_FILE = "quiz_history.json"
-ORAL_FILE = "oral_db.json"
-README_FILE = "使用说明.txt"
+# ==================== 1. UI 与 侧边栏配置 ====================
+st.set_page_config(page_title="多语种自适应看板 (终极版)", page_icon="🌎", layout="wide")
 
-# ==================== 1. 自动生成说明书 ====================
-def generate_readme_if_not_exists():
-    if not os.path.exists(README_FILE):
-        readme_content = """===================================================
-                  自适应英语口语与翻译训练看板 使用说明书
-===================================================
+st.sidebar.title("⚙️ 云端系统设置")
+api_key = st.sidebar.text_input("AI API Key", type="password", value=st.session_state.get("api_key", ""))
+base_url = st.sidebar.text_input("AI Base URL", value="https://api.deepseek.com")
+model_name = st.sidebar.selectbox("选择模型", ["deepseek-chat", "gpt-4o-mini", "gemini-1.5-flash"], index=0)
 
-【核心文件说明 - 切勿删除！】
-1. vocab_db.json
-   - 您的核心词库资产！包含所有导入的生词、例句和自适应权重分配。
+st.sidebar.markdown("---")
+supa_url = st.sidebar.text_input("Supabase URL", value=st.session_state.get("supa_url", ""))
+supa_key = st.sidebar.text_input("Supabase Key", type="password", value=st.session_state.get("supa_key", ""))
 
-2. oral_db.json
-   - 您的口语卡片库！保存了由播客/美剧文本、PDF、Word 智能转换而来的“场景-口语”闪卡。
+if api_key: st.session_state["api_key"] = api_key
+if base_url: st.session_state["base_url"] = base_url
+if model_name: st.session_state["model_name"] = model_name
+if supa_url: st.session_state["supa_url"] = supa_url
+if supa_key: st.session_state["supa_key"] = supa_key
 
-3. quiz_history.json
-   - 您的翻译训练足迹与AI精细纠错历史。
+def get_llm_client():
+    if not st.session_state.get("api_key"): return None
+    return OpenAI(api_key=st.session_state["api_key"], base_url=st.session_state["base_url"])
 
-4. app.py
-   - 系统的运行引擎。升级时只需替换此文件内容。
-
-【云端/移动端异地 iPhone 使用特别提醒】
-由于 Streamlit Cloud 云服务器定期重启，请在每次训练结束后，在「笔记管理」页：
-- 点击下载备份您的 vocab_db.json、oral_db.json 和 quiz_history.json。
-- 下次开始学习前，重新上传恢复即可。
-
-===================================================
-"""
-        with open(README_FILE, "w", encoding="utf-8") as f:
-            f.write(readme_content)
-
-generate_readme_if_not_exists()
-
-# ==================== 2. 数据库兼容与初始化 ====================
-def migrate_db():
-    if not os.path.exists(VOCAB_FILE):
-        with open(VOCAB_FILE, "w", encoding="utf-8") as f:
-            json.dump({"vocab_list": []}, f, ensure_ascii=False, indent=4)
-    else:
-        try:
-            with open(VOCAB_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict) and "words" in data:
-                old_words = data["words"]
-                new_list = [{"word": w, "example": "", "weight": 1.0, "score": 3, "tested_once": True} for w in old_words]
-                data = {"vocab_list": new_list}
-            if isinstance(data, dict) and "vocab_list" in data:
-                updated = False
-                for item in data["vocab_list"]:
-                    if "tested_once" not in item:
-                        item["tested_once"] = True 
-                        updated = True
-                    if "weight" not in item:
-                        item["weight"] = 1.0
-                        updated = True
-                if updated:
-                    with open(VOCAB_FILE, "w", encoding="utf-8") as f:
-                        json.dump(data, f, ensure_ascii=False, indent=4)
-        except Exception as e:
-            pass
-
-    if not os.path.exists(ORAL_FILE):
-        with open(ORAL_FILE, "w", encoding="utf-8") as f:
-            json.dump({"cards": []}, f, ensure_ascii=False, indent=4)
-
-    if not os.path.exists(HISTORY_FILE):
-        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-            json.dump([], f, ensure_ascii=False, indent=4)
-
-migrate_db()
-
-# ==================== 3. 核心数据读写与解析函数 ====================
-def load_vocab():
-    with open(VOCAB_FILE, "r", encoding="utf-8") as f:
-        return json.load(f).get("vocab_list", [])
-
-def save_vocab(vocab_list):
-    with open(VOCAB_FILE, "w", encoding="utf-8") as f:
-        json.dump({"vocab_list": vocab_list}, f, ensure_ascii=False, indent=4)
-
-def load_oral():
-    with open(ORAL_FILE, "r", encoding="utf-8") as f:
-        return json.load(f).get("cards", [])
-
-def save_oral(cards):
-    with open(ORAL_FILE, "w", encoding="utf-8") as f:
-        json.dump({"cards": cards}, f, ensure_ascii=False, indent=4)
-
-def load_history():
-    with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-def save_history(history_item):
-    history = load_history()
-    history.insert(0, history_item)
-    with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-        json.dump(history, f, ensure_ascii=False, indent=4)
-
-# 自动解析 PDF 文本
-def extract_text_from_pdf(file_obj):
-    reader = PdfReader(file_obj)
-    text = ""
-    for page in reader.pages:
-        text += page.extract_text() or ""
-    return text
-
-# 自动解析 Word 文本
-def extract_text_from_docx(file_obj):
-    if docx is None:
-        raise ImportError("检测到本地未安装 python-docx 模块。请在 CMD 运行: pip install python-docx 并在本地重启")
-    doc = docx.Document(file_obj)
-    fullText = []
-    for para in doc.paragraphs:
-        fullText.append(para.text)
-    return '\n'.join(fullText)
-
-# ==================== 4. 自适应新词优先调度算法 ====================
-def get_adaptive_sample(vocab_list, k=2):
-    if not vocab_list:
-        return []
-    k = min(k, len(vocab_list))
-    untested_pool = [item for item in vocab_list if not item.get("tested_once", False)]
-    selected = []
-    
-    if untested_pool:
-        num_new_to_pick = min(random.randint(1, k), len(untested_pool))
-        new_picks = random.sample(untested_pool, num_new_to_pick)
-        selected.extend(new_picks)
-        
-        remaining_k = k - len(selected)
-        if remaining_k > 0:
-            remaining_pool = [item for item in vocab_list if item not in selected]
-            for _ in range(remaining_k):
-                if not remaining_pool:
-                    break
-                w_temp = [item.get("weight", 1.0) for item in remaining_pool]
-                choice = random.choices(remaining_pool, weights=w_temp, k=1)[0]
-                selected.append(choice)
-                remaining_pool.remove(choice)
-    else:
-        temp_list = list(vocab_list)
-        for _ in range(k):
-            if not temp_list:
-                break
-            w_temp = [item.get("weight", 1.0) for item in temp_list]
-            choice = random.choices(temp_list, weights=w_temp, k=1)[0]
-            selected.append(choice)
-            temp_list.remove(choice)
-    return selected
-
-def update_vocab_state_and_weight(word_text, score):
-    vocab_list = load_vocab()
-    updated = False
-    for item in vocab_list:
-        if item["word"].lower() == word_text.lower():
-            item["tested_once"] = True
-            current_weight = item.get("weight", 1.0)
-            item["score"] = score
-            if score <= 2:
-                item["weight"] = min(current_weight * 2.0, 10.0)
-            elif score >= 4:
-                item["weight"] = max(current_weight * 0.5, 0.1)
-            updated = True
-            break
-    if updated:
-        save_vocab(vocab_list)
+def get_supabase_client():
+    if not st.session_state.get("supa_url") or not st.session_state.get("supa_key"): return None
+    try: return create_client(st.session_state["supa_url"], st.session_state["supa_key"])
+    except Exception: return None
 
 def generate_audio(text, lang='en'):
     try:
@@ -194,487 +48,316 @@ def generate_audio(text, lang='en'):
         tts.write_to_fp(fp)
         fp.seek(0)
         return fp
-    except Exception as e:
-        return None
+    except Exception: return None
 
-# ==================== 5. Streamlit UI 渲染 ====================
-st.set_page_config(page_title="自适应英语口语与翻译看板", page_icon="🗣️", layout="centered")
+def extract_text_from_pdf(file_obj):
+    reader = PdfReader(file_obj)
+    text = "".join([page.extract_text() or "" for page in reader.pages])
+    return text
 
-st.sidebar.title("⚙️ 系统设置")
-api_key = st.sidebar.text_input("API Key", type="password", value=st.session_state.get("api_key", ""))
-base_url = st.sidebar.text_input("API Base URL", value="https://api.openai.com/v1")
-model_name = st.sidebar.selectbox("选择模型", ["gpt-4o-mini", "gpt-4o", "deepseek-chat"], index=0)
+def extract_text_from_docx(file_obj):
+    if docx is None: return ""
+    doc = docx.Document(file_obj)
+    return '\n'.join([para.text for para in doc.paragraphs])
 
-if api_key:
-    st.session_state["api_key"] = api_key
-    st.session_state["base_url"] = base_url
-    st.session_state["model_name"] = model_name
+# 初始化状态
+if "current_l0" not in st.session_state: st.session_state.current_l0 = None
+if "current_l1" not in st.session_state: st.session_state.current_l1 = None
+if "show_l1_meaning" not in st.session_state: st.session_state.show_l1_meaning = False
+if "l2_quiz" not in st.session_state: st.session_state.l2_quiz = None
+if "active_oral_card" not in st.session_state: st.session_state.active_oral_card = None
+if "show_oral_answer" not in st.session_state: st.session_state.show_oral_answer = False
 
-def get_llm_client():
-    if not st.session_state.get("api_key"):
-        st.warning("请先在左侧边栏配置您的 API Key。")
-        return None
-    return OpenAI(api_key=st.session_state["api_key"], base_url=st.session_state["base_url"])
+tab_learn, tab_l2, tab_oral, tab_manage, tab_plan = st.tabs(["📚 词汇漏斗", "🎯 实战输出(L2)", "🗣️ 口语闪卡", "📂 云端管理", "🗓️ 计划与历史"])
 
-if "current_quiz" not in st.session_state:
-    st.session_state.current_quiz = None
-if "evaluation_text" not in st.session_state:
-    st.session_state.evaluation_text = None
-if "active_oral_card" not in st.session_state:
-    st.session_state.active_oral_card = None
-if "show_oral_answer" not in st.session_state:
-    st.session_state.show_oral_answer = False
-
-tab_quiz, tab_oral, tab_manage, tab_history = st.tabs(["🎯 翻译训练", "🗣️ 口语召回", "📚 笔记管理", "⏳ 历史复习"])
-
-# ==================== Tab 1: 翻译训练 ====================
-with tab_quiz:
-    st.subheader("今日自适应强化挑战")
-    vocab_list = load_vocab()
-    untested_count = len([item for item in vocab_list if not item.get("tested_once", False)])
-    if untested_count > 0:
-        st.info(f"💡 发现新词！当前有 **{untested_count}** 个新词正处于首轮必修测试阶段。")
-        
-    if not vocab_list:
-        st.info("您的词汇库目前为空，请前往『笔记管理』标签页上传 PDF。")
-    else:
-        client = get_llm_client()
-        if st.button("🔄 生成新翻译题目", use_container_width=True):
-            if client:
-                with st.spinner("AI 正在精心设计翻译题目..."):
-                    selected_items = get_adaptive_sample(vocab_list, k=2)
-                    context_info = []
-                    for item in selected_items:
-                        info_str = f"单词: '{item['word']}'"
-                        if item.get("example"):
-                            info_str += f" (例句: {item['example']})"
-                        context_info.append(info_str)
-                    
-                    terms_prompt = "; ".join(context_info)
-                    prompt = f"""
-                    你是一位英语母语外教。请基于以下用户笔记词汇及例句语境：
-                    {terms_prompt}
-                    任务：创造一个地道、不含生硬中式翻译腔的中文句子。
-                    要求：该句子的地道英语翻译中，必须自然流畅地应用上述提供的单词和短语。
-                    请仅输出一句中文，不要带有任何前后点缀。
-                    """
-                    try:
-                        response = client.chat.completions.create(
-                            model=st.session_state["model_name"],
-                            messages=[{"role": "user", "content": prompt}],
-                            temperature=0.8
-                        )
-                        zh_sentence = response.choices[0].message.content.strip()
-                        st.session_state.current_quiz = {
-                            "zh_sentence": zh_sentence,
-                            "selected_items": selected_items
-                        }
-                        st.session_state.evaluation_text = None
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"生成题目出错: {e}")
-        
-        if st.session_state.current_quiz:
-            st.markdown("##### 🎯 请翻译以下中文句子：")
-            st.info(st.session_state.current_quiz["zh_sentence"])
-            tips = []
-            for item in st.session_state.current_quiz["selected_items"]:
-                is_new = "🆕 新词" if not item.get("tested_once", False) else f"复习 (权重: {item.get('weight', 1.0):.1f})"
-                tips.append(f"`{item['word']}` ({is_new})")
-            st.markdown(f"💡 本题考核重点：{' | '.join(tips)}")
-            
-            user_translation = st.text_area("✍️ 您的英文翻译：", placeholder="在此输入您的译文...", key="user_input_area")
-            col_submit, col_skip = st.columns([1, 1])
-            submit_clicked, skip_clicked = False, False
-            with col_submit:
-                if st.button("🚀 提交翻译并评估", type="primary", use_container_width=True):
-                    if not user_translation.strip():
-                        st.warning("请输入答案后再提交。")
-                    else:
-                        submit_clicked = True
-            with col_skip:
-                if st.button("👀 直接显示答案", use_container_width=True):
-                    skip_clicked = True
-            
-            if (submit_clicked or skip_clicked) and client:
-                is_skip = skip_clicked
-                input_translation = "（用户选择直接看答案）" if is_skip else user_translation
-                eval_prompt = f"""
-                原中文句子：{st.session_state.current_quiz['zh_sentence']}
-                用户尝试翻译：{input_translation}
-                目标考察词汇：{[item['word'] for item in st.session_state.current_quiz['selected_items']]}
-
-                请扮演完美的英语母语专家，严格按以下格式（使用 Markdown）输出解析：
-
-                ### 1. 译文评估与纠错 {'(用户已跳过作答)' if is_skip else ''}
-                { '用户直接查看了答案。请指引用户阅读下方的地道版本并进行跟读。' if is_skip else '详细指出用户翻译在语法、语序及用词自然度上的问题，并进行细节重塑。' }
-
-                ### 2. 母语者地道写法
-                *   **书面/学术写法 (Written Style)**: [地道的写作、演讲或书面语写法]
-                *   **口语/日常表达 (Spoken Style)**: [母语者日常高频使用的、地道口语表达]
-
-                ### 3. 语言点精讲
-                [讲解以上句子中考查词汇的应用方法，以及核心搭配。]
-
-                ---
-                ### 4. 掌握程度自动评分（此项必须输出）
-                请在最后一行对用户的翻译进行精准打分（若用户跳过作答，评分一律为 1 ）。
-                [SCORE: X]  （其中 X 是 1 到 5 之间的整数）
-                """
-                st.markdown("---")
-                st.markdown("##### 📝 专家实时分析反馈")
-                feedback_container = st.empty()
-                full_response = ""
-                try:
-                    stream = client.chat.completions.create(
-                        model=st.session_state["model_name"],
-                        messages=[{"role": "user", "content": eval_prompt}],
-                        temperature=0.3,
-                        stream=True
-                    )
-                    for chunk in stream:
-                        if chunk.choices[0].delta.content is not None:
-                            full_response += chunk.choices[0].delta.content
-                            feedback_container.markdown(full_response)
-                    st.session_state.evaluation_text = full_response
-                    
-                    score_match = re.search(r'\[SCORE:\s*([1-5])\]', full_response)
-                    score_val = int(score_match.group(1)) if score_match else (1 if is_skip else 3)
-                    for item in st.session_state.current_quiz["selected_items"]:
-                        update_vocab_state_and_weight(item["word"], score_val)
-                    
-                    clean_feedback = re.sub(r'---.*\[SCORE:\s*[1-5]\]', '', full_response, flags=re.DOTALL)
-                    history_item = {
-                        "date": "今日训练",
-                        "zh": st.session_state.current_quiz['zh_sentence'],
-                        "user_en": input_translation,
-                        "feedback": clean_feedback
-                    }
-                    save_history(history_item)
-                except Exception as e:
-                    st.error(f"分析失败: {e}")
-            
-            if st.session_state.evaluation_text:
-                st.markdown("##### 🎧 发音跟读训练")
-                tts_text = st.text_input("复制上方推荐的纯英文，点击下方播放声音：", key="quiz_tts")
-                if tts_text.strip():
-                    audio_stream = generate_audio(tts_text)
-                    if audio_stream:
-                        st.audio(audio_stream, format="audio/mp3")
-
-# ==================== Tab 2: 口语召回 ====================
-with tab_oral:
-    st.subheader("🗣️ 3秒即兴口语闪卡测试（Active Retrieval）")
-    oral_cards = load_oral()
-    st.caption("基于“意音绑定”理论。工具将向您呈现“抽象的中文生活场景”，不进行文字翻译，逼迫您的大脑在 3 秒内直接脑内投影画面，并以微声或对口型的方式脱口而出对应的地道短语和英文整句。")
+# ==================== Tab 1: 词汇漏斗 (Level 0 & Level 1) ====================
+with tab_learn:
+    st.subheader("📚 每日双语提取训练")
+    lang_choice = st.radio("选择当前训练语种", ["🇬🇧 英语 (EN)", "🇯🇵 日语 (JP)"], horizontal=True)
+    db_lang = "EN" if "EN" in lang_choice else "JP"
     
-    col_gen_card, col_clear_card = st.columns([1, 1])
-    with col_gen_card:
-        if st.button("🎲 生成随机口语场景", use_container_width=True, type="primary"):
-            if not oral_cards:
-                st.warning("口语库为空，请先在下方导入播客文本或文档进行生成。")
-            else:
-                st.session_state.active_oral_card = random.choice(oral_cards)
-                st.session_state.show_oral_answer = False
-                st.rerun()
-                
-    with col_clear_card:
-        if st.button("🗑️ 清空当前口语库", use_container_width=True):
-            save_oral([])
-            st.session_state.active_oral_card = None
-            st.success("已清空口语库！")
-            st.rerun()
-
-    if st.session_state.active_oral_card:
+    db = get_supabase_client()
+    if not db:
+        st.warning("请在左侧配置数据库连接。")
+    else:
+        l0_words = db.table("vocab").select("*").eq("language", db_lang).eq("level", 0).execute().data
+        l1_words = db.table("vocab").select("*").eq("language", db_lang).eq("level", 1).execute().data
+        st.write(f"📊 **当前进度 ({db_lang})：** 待速览(L0): `{len(l0_words)}` 个 | 待闪卡回忆(L1): `{len(l1_words)}` 个")
         st.markdown("---")
-        st.markdown("#### 🚨 场景线索（限时3秒，切勿在心中翻译中文）：")
-        st.info(st.session_state.active_oral_card["scenario"])
-        st.warning("⏱️ **请立刻在脑海里勾勒这个画面和情绪，并在嘴边微声/低气流吐出英文！**")
         
-        col_show_ans, col_next_card = st.columns(2)
-        with col_show_ans:
-            if st.button("👀 显示地道英文标准答案", use_container_width=True):
-                st.session_state.show_oral_answer = True
-        with col_next_card:
-            if st.button("⏭️ 下一个场景", use_container_width=True):
-                st.session_state.active_oral_card = random.choice(oral_cards)
-                st.session_state.show_oral_answer = False
-                st.rerun()
+        col_l0, col_l1 = st.columns(2)
+        
+        with col_l0:
+            st.markdown("#### 🆕 Level 0: 新词速览")
+            if l0_words:
+                if not st.session_state.current_l0 or st.session_state.current_l0['language'] != db_lang:
+                    st.session_state.current_l0 = random.choice(l0_words)
+                w = st.session_state.current_l0
+                st.info(f"### {w['word']}")
                 
-        if st.session_state.show_oral_answer:
-            st.markdown("#### 🔑 标准母语答案：")
-            st.success(f"**核心语块：** `{st.session_state.active_oral_card['phrase']}`")
-            st.markdown(f"**地道口语原句：** \n> {st.session_state.active_oral_card['full_sentence']}")
-            
-            st.markdown("##### 🎧 标准原声跟读（Echo练习）：")
-            ans_audio = generate_audio(st.session_state.active_oral_card['full_sentence'])
-            if ans_audio:
-                st.audio(ans_audio, format="audio/mp3")
-
-    st.markdown("---")
-    
-    # 【多模态智能导入重构】：支持手动输入、PDF以及Word
-    st.write("##### 📥 多功能智能素材导入（支持输入、PDF、Word）")
-    st.caption("您可以复制粘贴文本，或直接上传 PDF / Word (.docx) / TXT 文档作为口语卡片的提取素材 [1]。")
-    
-    import_mode = st.radio("选择导入载体", ["手动输入/粘贴文本", "上传本地文档 (PDF/Word/TXT)"], horizontal=True)
-    
-    raw_podcast_text = ""
-    
-    if import_mode == "手动输入/粘贴文本":
-        raw_podcast_text = st.text_area("请在这里粘贴您要学习的播客台词本或美剧台词原文：", height=150, placeholder="在此粘贴文本内容...")
-    else:
-        uploaded_doc = st.file_uploader("点击或拖拽上传台词文件 (支持 .pdf, .docx, .txt)", type=["pdf", "docx", "txt"])
-        if uploaded_doc is not None:
-            with st.spinner("正在提取文档内容..."):
-                try:
-                    file_extension = uploaded_doc.name.split(".")[-1].lower()
-                    if file_extension == "pdf":
-                        raw_podcast_text = extract_text_from_pdf(uploaded_doc)
-                    elif file_extension == "docx":
-                        raw_podcast_text = extract_text_from_docx(uploaded_doc)
-                    elif file_extension == "txt":
-                        raw_podcast_text = str(uploaded_doc.read(), "utf-8")
-                    
-                    if raw_podcast_text.strip():
-                        st.success(f"📂 成功读取文档！共提取到 {len(raw_podcast_text)} 个字符。已准备好进行AI智能提炼。")
-                    else:
-                        st.error("未能提取到有效字符，请检查文件是否为空或纯扫描版。")
-                except Exception as e:
-                    st.error(f"提取文件内容失败: {e}")
-                    
-    if st.button("✨ 智能提取并生成场景口语卡片", use_container_width=True):
-        client = get_llm_client()
-        if not raw_podcast_text.strip():
-            st.warning("当前没有有效文本，请先输入内容或成功上传文件。")
-        elif client:
-            with st.spinner("AI 正在提炼核心语料，并为您定制『抽象场景线索』..."):
-                extract_prompt = """
-                请担任资深的母语级同声传译与口语教练。分析以下文本，提炼出 3-5 个极其地道、实用、有价值的口语高频短语、词组或固定句式。
-                为每个提取的内容生成：
-                1. "phrase": 地道英文词组/短语（如 'bite the bullet'）。
-                2. "scenario": 用【中文描述一个抽象的情感、生活场景或谈话情境】作为触发线索。
-                   【极其重要规则】：场景描述绝对不能是英文例句的中文翻译，而必须是描述一种真实的场景、情绪或人际互动痛点，引导用户通过画面感产生直接反射（例如，如果词是 'bite the bullet'，场景描述应该是 '当你打算深吸一口气，准备去和老板主动承认今天工作中的严重失误时，你想着自己必须硬着头皮顶住...'）。
-                3. "full_sentence": 包含该短语的、极度自然且符合现代母语者口语习惯的完整英文例句。
-
-                请严格以 JSON 格式输出，不要包含任何前后解释文字：
-                {
-                  "cards": [
-                    {"phrase": "...", "scenario": "...", "full_sentence": "..."}
-                  ]
-                }
-                
-                待提炼的原文文本：
-                """ + raw_podcast_text[:2800]
-                
-                try:
-                    response = client.chat.completions.create(
-                        model=st.session_state["model_name"],
-                        messages=[{"role": "user", "content": extract_prompt}],
-                        response_format={ "type": "json_object" },
-                        temperature=0.4
-                    )
-                    res_json = json.loads(response.choices[0].message.content)
-                    new_cards = res_json.get("cards", [])
-                    
-                    if new_cards:
-                        existing_cards = load_oral()
-                        existing_phrases = {c["phrase"].lower() for c in existing_cards}
-                        added_count = 0
-                        for card in new_cards:
-                            if card["phrase"].lower() not in existing_phrases:
-                                existing_cards.append(card)
-                                added_count += 1
-                        save_oral(existing_cards)
-                        st.success(f"🎉 智能导入成功！新增了 {added_count} 个极具画面感的口语召回卡片！")
-                        st.rerun()
-                    else:
-                        st.error("未能提炼出卡片，请尝试更换文档文本内容。")
-                except Exception as e:
-                    st.error(f"提取失败，原因: {e}")
-
-# ==================== Tab 3: 笔记管理 ====================
-with tab_manage:
-    st.subheader("📂 笔记库管理与导入")
-    
-    # 1. PDF 导入
-    st.write("##### 1. 导入 PDF 笔记")
-    uploaded_file = st.file_uploader("选择 PDF 格式个人笔记导入翻译词汇库", type=["pdf"], key="manage_pdf")
-    
-    if uploaded_file is not None:
-        if st.button("智能提取并标记新词", use_container_width=True):
-            with st.spinner("正在提取..."):
-                try:
-                    reader = PdfReader(uploaded_file)
-                    raw_text = ""
-                    for page in reader.pages[:10]:
-                        raw_text += page.extract_text() or ""
-                    
-                    client = get_llm_client()
-                    cleaned_items = []
-                    
-                    if client and raw_text.strip():
-                        extract_prompt = f"""
-                        从以下文本中提炼重要英文词汇或短语，并为其匹配原文中的例句。
-                        请输出 JSON 格式（严禁包含任何其他文字说明）：
-                        {{
-                          "vocab_list": [
-                            {{"word": "短语或单词", "example": "包含该短语的原文完整例句"}}
-                          ]
-                        }}
-                        文本：
-                        {raw_text[:2500]}
-                        """
-                        response = client.chat.completions.create(
-                            model=st.session_state["model_name"],
-                            messages=[{"role": "user", "content": extract_prompt}],
-                            response_format={ "type": "json_object" },
-                            temperature=0.3
-                        )
-                        res_json = json.loads(response.choices[0].message.content)
-                        extracted_list = res_json.get("vocab_list", [])
+                if st.button("🧠 获取 AI 解析 (Hint)", key="hint_l0"):
+                    llm = get_llm_client()
+                    if llm:
+                        hint_prompt = f"告诉我单词 '{w['word']}' 的中文意思和词性。如果是日语请附带假名读音和音调说明；如果是英语请给一个常考短语。"
+                        resp = llm.chat.completions.create(model=st.session_state["model_name"], messages=[{"role": "user", "content": hint_prompt}], temperature=0.3)
+                        st.success(resp.choices[0].message.content)
                         
-                        for item in extracted_list:
-                            cleaned_items.append({
-                                "word": item.get("word", "").strip(),
-                                "example": item.get("example", "").strip(),
-                                "weight": 1.0,
-                                "score": 3,
-                                "tested_once": False
-                            })
-                    else:
-                        st.warning("已降级启用本地提取。")
-                        local_words = re.findall(r'\b[a-zA-Z][a-zA-Z\s\-\']{2,24}\b', raw_text)
-                        stop_words = {"the", "and", "that", "this", "with", "from"}
-                        cleaned_words = list({w.strip().lower() for w in local_words if w.strip().lower() not in stop_words})
-                        for w in cleaned_words:
-                            cleaned_items.append({"word": w, "example": "", "weight": 1.0, "score": 3, "tested_once": False})
-                    
-                    if cleaned_items:
-                        current_vocab = load_vocab()
-                        existing_dict = {item["word"].lower(): item for item in current_vocab}
-                        for new_item in cleaned_items:
-                            w_lower = new_item["word"].lower()
-                            if w_lower not in existing_dict:
-                                existing_dict[w_lower] = new_item
-                            else:
-                                if not existing_dict[w_lower].get("example") and new_item.get("example"):
-                                    existing_dict[w_lower]["example"] = new_item["example"]
-                        save_vocab(list(existing_dict.values()))
-                        st.success(f"🎉 成功载入 {len(cleaned_items)} 个新翻译考核词汇！")
-                        st.rerun()
-                except Exception as e:
-                    st.error(f"导入失败: {e}")
-
-    st.markdown("---")
-    
-    # 2. 手动添加
-    st.write("##### 2. 手动键入新词汇")
-    new_w = st.text_input("手动添加单词或短语")
-    new_ex = st.text_area("配套例句 context", key="manual_ex")
-    if st.button("确认手动录入"):
-        if new_w.strip():
-            vocab_list = load_vocab()
-            existing_words = [item["word"].lower() for item in vocab_list]
-            if new_w.strip().lower() not in existing_words:
-                vocab_list.append({
-                    "word": new_w.strip(),
-                    "example": new_ex.strip(),
-                    "weight": 1.0,
-                    "score": 3,
-                    "tested_once": False
-                })
-                save_vocab(vocab_list)
-                st.success(f"成功录入翻译新词: {new_w}")
-                st.rerun()
+                if st.button("✅ 记住了，推入 Level 1", type="primary", use_container_width=True):
+                    db.table("vocab").update({"level": 1}).eq("id", w["id"]).execute()
+                    st.session_state.current_l0 = None
+                    st.rerun()
             else:
-                st.warning("该词已在库中。")
+                st.success("今日 L0 任务已清空！")
+                
+        with col_l1:
+            st.markdown("#### 🧠 Level 1: 3秒无声回忆")
+            if l1_words:
+                if not st.session_state.current_l1 or st.session_state.current_l1['language'] != db_lang:
+                    weights = [float(x.get("weight", 1.0)) for x in l1_words]
+                    st.session_state.current_l1 = random.choices(l1_words, weights=weights, k=1)[0]
+                    st.session_state.show_l1_meaning = False
+                
+                w1 = st.session_state.current_l1
+                st.warning(f"## {w1['word']}")
+                
+                if not st.session_state.show_l1_meaning:
+                    if st.button("👀 点击核对答案", use_container_width=True):
+                        st.session_state.show_l1_meaning = True
+                        st.rerun()
+                else:
+                    llm = get_llm_client()
+                    if llm:
+                        resp = llm.chat.completions.create(model=st.session_state["model_name"], messages=[{"role": "user", "content": f"给出 '{w1['word']}' 的极简中文意思。如果日语请带假名。"}], temperature=0.1)
+                        st.success(f"**含义：** {resp.choices[0].message.content.strip()}")
+                    
+                    c1, c2, c3 = st.columns(3)
+                    with c1:
+                        if st.button("🟢 认识 (进L2)", use_container_width=True):
+                            db.table("vocab").update({"level": 2, "weight": 1.0, "score": 5}).eq("id", w1["id"]).execute()
+                            st.session_state.current_l1 = None
+                            st.rerun()
+                    with c2:
+                        if st.button("🟡 模糊", use_container_width=True):
+                            db.table("vocab").update({"weight": min(float(w1.get("weight",1.0))*1.5, 10.0), "score": 3}).eq("id", w1["id"]).execute()
+                            st.session_state.current_l1 = None
+                            st.rerun()
+                    with c3:
+                        if st.button("🔴 忘记", use_container_width=True):
+                            db.table("vocab").update({"weight": min(float(w1.get("weight",1.0))*2.5, 10.0), "score": 1}).eq("id", w1["id"]).execute()
+                            st.session_state.current_l1 = None
+                            st.rerun()
+            else:
+                st.success("今日 L1 任务已清空！")
 
-    st.markdown("---")
+# ==================== Tab 2: 强迫造句/变形 (Level 2) ====================
+with tab_l2:
+    st.subheader("🎯 Level 2: 实战输出与变形训练")
+    l2_lang = st.radio("选择 L2 实战语种", ["🇬🇧 英语 (EN)", "🇯🇵 日语 (JP)"], horizontal=True)
+    db_lang_l2 = "EN" if "EN" in l2_lang else "JP"
     
-    # 3. 云端备份
-    st.write("##### 3. 💾 云端数据备份与恢复 (异地 iPhone 使用必看)")
-    st.caption("因为 Streamlit 云端服务器会定期重启，为防进度丢失，请随时在此下载备份，重新打开网页时上传恢复。")
+    db = get_supabase_client()
+    llm = get_llm_client()
     
-    col_dl_v, col_dl_o, col_dl_h = st.columns(3)
-    with col_dl_v:
-        with open(VOCAB_FILE, "r", encoding="utf-8") as f:
-            v_data = f.read()
-        st.download_button("📥 备份翻译词库", data=v_data, file_name="vocab_db.json", mime="application/json", use_container_width=True)
-    with col_dl_o:
-        with open(ORAL_FILE, "r", encoding="utf-8") as f:
-            o_data = f.read()
-        st.download_button("📥 备份口语卡片库", data=o_data, file_name="oral_db.json", mime="application/json", use_container_width=True)
-    with col_dl_h:
-        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-            h_data = f.read()
-        st.download_button("📥 备份翻译历史", data=h_data, file_name="quiz_history.json", mime="application/json", use_container_width=True)
+    if db and llm:
+        l2_words = db.table("vocab").select("*").eq("language", db_lang_l2).eq("level", 2).execute().data
         
-    st.markdown("⬇️ **上传恢复区域**")
+        if len(l2_words) < (3 if db_lang_l2 == "EN" else 2):
+            st.warning(f"当前 L2 库中词汇太少。英语需至少 3 个，日语需至少 2 个。请先去 Tab 1 背词！")
+        else:
+            if st.button("🎲 抽取词汇，生成 AI 挑战", type="primary", use_container_width=True):
+                with st.spinner("AI 正在构思挑战..."):
+                    k = 3 if db_lang_l2 == "EN" else random.choice([1, 2])
+                    weights = [float(x.get("weight", 1.0)) for x in l2_words]
+                    selected = random.choices(l2_words, weights=weights, k=k)
+                    word_list = [x['word'] for x in selected]
+                    
+                    if db_lang_l2 == "EN":
+                        prompt = f"基于这三个英语单词：{word_list}。用中文为我设定一个日常或学术场景。要求：合理串联这三个词，只要中文描述，字数50以内。"
+                    else:
+                        prompt = f"""
+                        基于这些日语词汇：{word_list}。
+                        如果里面有动词/形容词，请出一个【变形与造句综合挑战】（例如：请把xx变成使役态，并造一个句子）。
+                        如果全是名词，请出一个【中译日情景挑战】（例如：你在居酒屋，请用这些词点单）。
+                        只输出中文挑战要求，千万不要给出日文答案！
+                        """
+                    
+                    resp = llm.chat.completions.create(model=st.session_state["model_name"], messages=[{"role": "user", "content": prompt}])
+                    st.session_state.l2_quiz = {"words": selected, "scenario": resp.choices[0].message.content.strip(), "lang": db_lang_l2}
+                    
+            if st.session_state.l2_quiz and st.session_state.l2_quiz["lang"] == db_lang_l2:
+                st.markdown("---")
+                quiz = st.session_state.l2_quiz
+                target_words = [x['word'] for x in quiz['words']]
+                st.markdown("#### 🚨 挑战要求：")
+                st.info(quiz['scenario'])
+                st.markdown(f"**目标词汇**：`{'` | `'.join(target_words)}`")
+                
+                if st.button("💡 绞尽脑汁想不起来？获取提示"):
+                    tips = llm.chat.completions.create(model=st.session_state["model_name"], messages=[{"role": "user", "content": f"简述词义/变形规则：{target_words}"}])
+                    st.success(tips.choices[0].message.content)
+                
+                user_sentence = st.text_area("✍️ 你的外语作答 (脑内构思后敲出来)：", placeholder="在此输入...")
+                
+                if st.button("🚀 提交给 AI 批改", use_container_width=True):
+                    if not user_sentence.strip():
+                        st.warning("请输入句子再提交。")
+                    else:
+                        if db_lang_l2 == "EN":
+                            eval_prompt = f"场景：{quiz['scenario']}\n要求用词：{target_words}\n用户句子：{user_sentence}\n请按Markdown格式输出：\n### 1. 原句诊断(含语法/中式英语纠错)\n### 2. 双版本重塑\n* 日常口语版\n* 托福学术版\n### 3. [SCORE: X] (1-5分)"
+                        else:
+                            eval_prompt = f"挑战：{quiz['scenario']}\n要求用词：{target_words}\n用户句子：{user_sentence}\n请按Markdown格式输出：\n### 1. 语法与变形诊断(重点分析助词、动词变形是否正确)\n### 2. 双版本重塑\n* 极简口语版(朋友间)\n* 标准丁宁体(N2书面/敬语)\n### 3. [SCORE: X] (1-5分)"
+                        
+                        with st.spinner("AI 导师正在阅卷..."):
+                            feedback = ""
+                            stream = llm.chat.completions.create(model=st.session_state["model_name"], messages=[{"role": "user", "content": eval_prompt}], stream=True)
+                            feedback_container = st.empty()
+                            for chunk in stream:
+                                if chunk.choices[0].delta.content:
+                                    feedback += chunk.choices[0].delta.content
+                                    feedback_container.markdown(feedback)
+                            
+                            score_match = re.search(r'\[SCORE:\s*([1-5])\]', feedback)
+                            score_val = int(score_match.group(1)) if score_match else 3
+                            for w in quiz['words']:
+                                new_w = min(float(w.get("weight", 1.0)) * 1.5, 10.0) if score_val <= 3 else max(float(w.get("weight", 1.0)) * 0.5, 0.1)
+                                db.table("vocab").update({"weight": new_w, "score": score_val}).eq("id", w["id"]).execute()
+                            
+                            db.table("history").insert({
+                                "date": f"L2挑战({db_lang_l2})",
+                                "zh_sentence": quiz['scenario'],
+                                "user_en": user_sentence,
+                                "feedback": re.sub(r'---.*\[SCORE:\s*[1-5]\]', '', feedback, flags=re.DOTALL)
+                            }).execute()
+
+# ==================== Tab 3: 口语召回 (3秒情景闪卡) ====================
+with tab_oral:
+    st.subheader("🗣️ 3秒即兴口语闪卡测试")
+    st.caption("来源于你日常看剧、听播客、和AI对话积累的金句。")
+    db = get_supabase_client()
     
-    up_vocab = st.file_uploader("📤 恢复翻译词汇库 (vocab_db.json)", type=["json"], key="restore_vocab")
-    if up_vocab is not None:
-        if st.button("确认恢复词汇库", use_container_width=True):
-            try:
-                r_vocab = json.load(up_vocab)
-                if "vocab_list" in r_vocab:
-                    save_vocab(r_vocab["vocab_list"])
-                    st.success("翻译词库已恢复！")
-                    st.rerun()
-            except Exception as e:
-                st.error(f"恢复失败: {e}")
-
-    up_oral = st.file_uploader("📤 恢复口语闪卡库 (oral_db.json)", type=["json"], key="restore_oral")
-    if up_oral is not None:
-        if st.button("确认恢复口语闪卡库", use_container_width=True):
-            try:
-                r_oral = json.load(up_oral)
-                if "cards" in r_oral:
-                    save_oral(r_oral["cards"])
-                    st.success("口语闪卡库已恢复！")
-                    st.rerun()
-            except Exception as e:
-                st.error(f"恢复失败: {e}")
-
-    up_hist = st.file_uploader("📤 恢复翻译历史足迹 (quiz_history.json)", type=["json"], key="restore_hist")
-    if up_hist is not None:
-        if st.button("确认恢复翻译历史足迹", use_container_width=True):
-            try:
-                r_hist = json.load(up_hist)
-                if isinstance(r_hist, list):
-                    with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-                        json.dump(r_hist, f, ensure_ascii=False, indent=4)
-                    st.success("历史足迹已恢复！")
-                    st.rerun()
-            except Exception as e:
-                st.error(f"恢复失败: {e}")
-
-    st.markdown("---")
-    
-    # 4. 词汇库展示
-    vocab_list = load_vocab()
-    st.write(f"##### 4. 本地翻译词库全景 (共计 {len(vocab_list)} 个)")
-    if vocab_list:
-        with st.expander("🔍 展开查看各单词状态和历史权重"):
-            for item in sorted(vocab_list, key=lambda x: (x.get('tested_once', False), -x.get('weight', 1.0))):
-                state_lbl = "✅ 已通过首测" if item.get("tested_once", False) else "🆕 必修新词"
-                st.write(f"- **{item['word']}** | `{state_lbl}` | 权重分: `{item.get('weight', 1.0):.2f}` | 例句: _{item.get('example', '无')}_")
+    if db:
+        oral_cards = db.table("oral_cards").select("*").execute().data
         
-        if st.button("🗑️ 彻底清空本地翻译词库", type="secondary"):
-            save_vocab([])
-            st.rerun()
+        col_gen_card, col_clear_card = st.columns([2, 1])
+        with col_gen_card:
+            if st.button("🎲 生成随机口语场景", use_container_width=True, type="primary"):
+                if not oral_cards:
+                    st.warning("口语库为空，请先在 Tab 4 导入素材。")
+                else:
+                    st.session_state.active_oral_card = random.choice(oral_cards)
+                    st.session_state.show_oral_answer = False
+                    st.rerun()
+                    
+        if st.session_state.active_oral_card:
+            st.markdown("---")
+            c = st.session_state.active_oral_card
+            st.markdown("#### 🚨 场景线索（限时3秒，微声脱口而出）：")
+            st.info(c["scenario"])
+            
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("👀 显示地道原句", use_container_width=True):
+                    st.session_state.show_oral_answer = True
+            with c2:
+                if st.button("⏭️ 下一个场景", use_container_width=True):
+                    st.session_state.active_oral_card = random.choice(oral_cards)
+                    st.session_state.show_oral_answer = False
+                    st.rerun()
+                    
+            if st.session_state.show_oral_answer:
+                st.success(f"**核心语块：** `{c['phrase']}`\n\n**地道原句：** {c['full_sentence']}")
+                lang_code = 'ja' if any('\u3040' <= char <= '\u309F' or '\u30A0' <= char <= '\u30FF' for char in c['full_sentence']) else 'en'
+                audio = generate_audio(c['full_sentence'], lang=lang_code)
+                if audio: st.audio(audio, format="audio/mp3")
 
-# ==================== Tab 4: 历史复习 ====================
-with tab_history:
-    st.subheader("⏳ 历史翻译足迹")
-    history_data = load_history()
+# ==================== Tab 4: 云端库管理 (多语种导入) ====================
+with tab_manage:
+    st.subheader("📂 多模态语料导入中心")
+    import_target = st.radio("导入至哪个库？", ["导入生词库 (L0/L1)", "导入口语召回库 (生成情境闪卡)"], horizontal=True)
+    import_lang = st.radio("语料语种", ["EN 英语", "JP 日语"], horizontal=True)
+    db_lang_import = "EN" if "EN" in import_lang else "JP"
     
-    if not history_data:
-        st.info("尚无训练历史。")
-    else:
-        for idx, item in enumerate(history_data[:15]):
-            with st.expander(f"📌 {item.get('date', '记录')} | 中文: {item['zh'][:15]}..."):
-                st.markdown(f"**中文原句：** {item['zh']}")
-                st.markdown(f"**您的翻译：** `{item['user_en']}`")
-                st.markdown("**AI 精细分析：**")
-                st.write(item['feedback'])
+    db = get_supabase_client()
+    llm = get_llm_client()
+    
+    if db and llm:
+        import_mode = st.radio("选择导入方式", ["直接粘贴文本", "上传文档 (PDF/Word/TXT)"], horizontal=True)
+        raw_text = ""
+        
+        if import_mode == "直接粘贴文本":
+            raw_text = st.text_area("在此粘贴你的词汇表、美剧台词或 AI 纠错对话记录：", height=150)
+        else:
+            file_obj = st.file_uploader("点击或拖拽上传文档 (支持 .pdf, .docx, .txt)", type=["pdf", "docx", "txt"])
+            if file_obj:
+                with st.spinner("正在提取文档内容..."):
+                    try:
+                        ext = file_obj.name.split(".")[-1].lower()
+                        if ext == "pdf": 
+                            raw_text = extract_text_from_pdf(file_obj)
+                        elif ext == "docx": 
+                            raw_text = extract_text_from_docx(file_obj)
+                        elif ext == "txt": 
+                            raw_text = str(file_obj.read(), "utf-8")
+                        
+                        if raw_text.strip():
+                            st.success(f"📂 成功读取文档！共提取到 {len(raw_text)} 个字符。已准备好进行AI智能提炼。")
+                        else:
+                            st.error("未能提取到有效字符，请检查文件。")
+                    except Exception as e:
+                        st.error(f"提取文件失败: {e}")
+
+        if st.button("🚀 智能提取并上传至云端", type="primary"):
+            if not raw_text.strip():
+                st.warning("内容为空！请粘贴文本或成功上传文档后再点击。")
+            else:
+                with st.spinner("AI 正在结构化数据并写入 Supabase 远端服务器..."):
+                    try:
+                        if import_target == "导入生词库 (L0/L1)":
+                            prompt = f"提取以下文本中的核心{db_lang_import}单词，只需输出单词本身，用逗号分隔。文本：{raw_text[:2000]}"
+                            resp = llm.chat.completions.create(model=st.session_state["model_name"], messages=[{"role": "user", "content": prompt}], temperature=0.3)
+                            word_list = resp.choices[0].message.content.strip().split(",")
+                            cleaned = [w.strip() for w in word_list if len(w.strip()) > 0]
+                            insert_data = [{"word": w, "language": db_lang_import, "level": 0} for w in cleaned]
+                            if insert_data:
+                                db.table("vocab").insert(insert_data).execute()
+                                st.success(f"🎉 成功写入 {len(cleaned)} 个新词至 Level 0 库！")
+                                
+                        else:
+                            prompt = f"""提取3-5个高频实用短语。输出JSON: {{"cards": [{{"phrase": "词组", "scenario": "中文描述极其具体的生活场景线索", "full_sentence": "包含该词的{db_lang_import}例句"}}]}}。文本：{raw_text[:2000]}"""
+                            resp = llm.chat.completions.create(model=st.session_state["model_name"], messages=[{"role": "user", "content": prompt}], response_format={"type": "json_object"})
+                            cards = json.loads(resp.choices[0].message.content).get("cards", [])
+                            if cards:
+                                db.table("oral_cards").insert(cards).execute()
+                                st.success(f"🎉 成功提取并写入 {len(cards)} 张口语情境闪卡！")
+                    except Exception as e:
+                        st.error(f"处理失败: {e}")
+
+# ==================== Tab 5: 计划与历史 ====================
+with tab_plan:
+    st.subheader("🗓️ 一年期托福&N2 攻坚计划表 (课堂碎片化防疲劳调度)")
+    st.info("""
+    **☀️ 上午专业课 (精力充沛：攻克英语)**
+    - *前20分钟*：打开看板 `Tab 1`，刷完今日托福 Level 0 和 Level 1 额度（无声心算打卡）。
+    - *后20分钟*：手机刷一篇 TPO 阅读，分析长难句。将长难句短语丢进 `Tab 4` 导入。
+    
+    **☕ 下午专业课 (容易犯困：切换日语)**
+    - *前20分钟*：打开看板 `Tab 2 (日语)`，玩动词变形 AI 挑战（极度清醒大脑）。
+    - *后20分钟*：阅读 NHK Easy News 或玩多邻国，保持语感。
+    
+    **🚶‍♂️ 通勤/回宿舍 (碎片听觉)**
+    - 戴单边耳机，使用【每日英语听力/日语听力】App 进行挖空回音跟读（单日英语，双日日语）。
+    
+    **🌃 晚间宿舍 (强迫输出)**
+    - 打开 ChatGPT 语音模式，与 AI 进行 5 分钟外语对练。
+    - 将 AI 纠错的地道表达粘贴进看板 `Tab 4 (口语召回库)`。睡觉前在 `Tab 3` 进行 3 秒闪卡测试。
+    """)
+    
+    st.markdown("---")
+    st.subheader("⏳ 云端学习足迹")
+    db = get_supabase_client()
+    if db:
+        hist = db.table("history").select("*").order("created_at", desc=True).limit(10).execute().data
+        for item in hist:
+            with st.expander(f"📌 {item.get('date', '')} | {item.get('zh_sentence', '')[:15]}..."):
+                st.markdown(f"**你的输出：** `{item.get('user_en', '')}`")
+                st.write(item.get('feedback', ''))
