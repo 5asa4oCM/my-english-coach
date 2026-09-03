@@ -313,7 +313,7 @@ with tab_manage:
                 with st.spinner("AI 正在结构化数据并写入 Supabase 远端服务器..."):
                     try:
                         if import_target == "导入生词库 (L0/L1)":
-                            prompt = f"提取以下文本中的核心{db_lang_import}单词，只需输出单词本身，用逗号分隔。文本：{raw_text[:2000]}"
+                            prompt = f"提取以下文本中的核心{db_lang_import}单词，只需输出单词本身，用逗号分隔。文本：{raw_text[:20000]}"
                             resp = llm.chat.completions.create(model=st.session_state["model_name"], messages=[{"role": "user", "content": prompt}], temperature=0.3)
                             word_list = resp.choices[0].message.content.strip().split(",")
                             cleaned = [w.strip() for w in word_list if len(w.strip()) > 0]
