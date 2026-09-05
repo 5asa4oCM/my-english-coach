@@ -99,6 +99,7 @@ with tab_learn:
                 
                 st.info(f"### {w['word']}")
                 st.markdown(f"🏷️ **来源:** `{w.get('tag', '未知')}` | 🗣️ **音标:** `{w.get('phonetic', '无')}`")
+                st.markdown(f"💡 **含义:** `{w.get('meaning', '暂无记录')}`")
                 if w.get('example'):
                     st.write(f"📖 **原著例句:** _{w['example']}_")
                 
@@ -134,13 +135,18 @@ with tab_learn:
                         st.rerun()
                 else:
                     st.markdown(f"🗣️ **音标:** `{w1.get('phonetic', '无')}`")
+                    
+                    # 优先显示库里保存的中文，如果没有再调用大模型
+                    if w1.get('meaning'):
+                        st.success(f"**核心含义：** {w1['meaning']}")
+                    else:
+                        llm = get_llm_client()
+                        if llm:
+                            resp = llm.chat.completions.create(model=st.session_state["model_name"], messages=[{"role": "user", "content": f"给出 '{w1['word']}' 的极简中文意思。"}], temperature=0.1)
+                            st.success(f"**含义：** {resp.choices[0].message.content.strip()}")
+                            
                     if w1.get('example'):
                         st.write(f"📖 **例句提示:** _{w1['example']}_")
-                    
-                    llm = get_llm_client()
-                    if llm:
-                        resp = llm.chat.completions.create(model=st.session_state["model_name"], messages=[{"role": "user", "content": f"给出 '{w1['word']}' 的极简中文意思。"}], temperature=0.1)
-                        st.success(f"**含义：** {resp.choices[0].message.content.strip()}")
                     
                     c1, c2, c3 = st.columns(3)
                     with c1:
@@ -164,8 +170,6 @@ with tab_learn:
 # ==================== Tab 2: 强迫造句/变形 (Level 2) ====================
 with tab_l2:
     st.subheader("🎯 Level 2: 实战输出与变形训练")
-    # 代码与之前版本一致，由于空间限制省略重复部分...
-    # (在实际运行中，此段保持不变，依然是L2造句核心)
     l2_lang = st.radio("选择 L2 实战语种", ["🇬🇧 英语 (EN)", "🇯🇵 日语 (JP)"], horizontal=True)
     db_lang_l2 = "EN" if "EN" in l2_lang else "JP"
     
@@ -243,36 +247,35 @@ with tab_oral:
             if st.session_state.show_oral_answer:
                 st.success(f"**语块：** `{c['phrase']}`\n\n**原句：** {c['full_sentence']}")
 
-# ==================== Tab 4: 词汇闪卡总览 (查阅已导入单词) ====================
+# ==================== Tab 4: 词汇闪卡总览 (新增中文含义显示) ====================
 with tab_cards:
     st.subheader("🗂️ 云端词库大阅兵")
-    st.caption("在这里你可以查看 AI 自动抓取到的所有单词、音标和原著例句，检查是否准确。")
+    st.caption("在这里你可以查看 AI 自动抓取到的所有单词、中文含义、音标和原著例句。")
     db = get_supabase_client()
     if db:
         all_words = db.table("vocab").select("*").order("id", desc=True).execute().data
         if not all_words:
             st.info("目前云端金库还是空的，快去『云端管理』导入吧！")
         else:
-            # 数据统计
             cet4_cnt = len([x for x in all_words if x.get('tag') == 'CET4'])
             toefl_cnt = len([x for x in all_words if x.get('tag') == 'TOEFL'])
             st.write(f"**库中总词数：{len(all_words)}** （包含 CET4: `{cet4_cnt}` 个，托福及其他: `{toefl_cnt}` 个）")
             
-            # 显示最新的 50 个单词防止卡顿
             for w in all_words[:50]:
                 with st.expander(f"🏷️ [{w.get('tag', '未知')}] {w['word']}  (Level {w['level']})"):
+                    # 新增显示中文意思
+                    st.write(f"**💡 含义:** `{w.get('meaning', '暂无（旧数据未记录，新导入即可包含）')}`")
                     st.write(f"**🗣️ 音标:** {w.get('phonetic', '无')}")
-                    st.write(f"**📖 提取的例句:** {w.get('example', '无例句')}")
+                    st.write(f"**📖 例句:** {w.get('example', '无例句')}")
                     st.write(f"**📈 抽中权重:** {w.get('weight', 1.0)}")
                     if st.button(f"🗑️ 删除该词", key=f"del_{w['id']}"):
                         db.table("vocab").delete().eq("id", w["id"]).execute()
                         st.rerun()
 
-# ==================== Tab 5: 云端管理 (精准去重与分类导入) ====================
+# ==================== Tab 5: 云端管理 (新增抓取中文含义) ====================
 with tab_manage:
     st.subheader("📂 智能词汇分拣中心")
     
-    # 核心缺陷修复1&2：增加导入类型的选择，决定级别和标签
     vocab_type = st.radio("你要导入的生词属于什么级别？", ["CET4 四级词汇 (直达 L1)", "TOEFL 托福词汇 (进入 L0)"], horizontal=True)
     import_lang = st.radio("语料语种", ["EN 英语", "JP 日语"], horizontal=True)
     db_lang_import = "EN" if "EN" in import_lang else "JP"
@@ -299,16 +302,20 @@ with tab_manage:
             if not raw_text.strip():
                 st.warning("文本为空！")
             else:
-                with st.spinner("AI 正在精准过滤废话，提取核心单词、音标与例句..."):
+                with st.spinner("AI 正在精准过滤废话，提取核心单词、中文意思、音标与例句..."):
                     try:
-                        # 核心缺陷修复7：要求 AI 精准提取主角单词和例句
+                        # 提示词增加提取 meaning
                         prompt = f"""
                         你是一个严谨的语言学专家。请从以下文本中提取**正在被讲解的核心词汇**。
-                        绝对不要提取例句或中文解释里夹杂的其他英语单词！
                         返回 JSON 格式：
                         {{
                             "words": [
-                                {{"word": "单词", "phonetic": "音标(如 [ˈpænl])", "example": "原文中该单词对应的英文例句(若无则留空)"}}
+                                {{
+                                    "word": "单词", 
+                                    "meaning": "简短精准的中文意思",
+                                    "phonetic": "音标(如 [ˈpænl])", 
+                                    "example": "原文中该单词对应的英文例句(若无则留空)"
+                                }}
                             ]
                         }}
                         文本：{raw_text[:4000]}
@@ -324,7 +331,6 @@ with tab_manage:
                         if not extracted_items:
                             st.error("未能找到符合条件的单词格式。")
                         else:
-                            # 核心缺陷修复3：查询数据库，防止重复导入
                             existing_words_res = db.table("vocab").select("word").eq("language", db_lang_import).execute().data
                             existing_set = {x['word'].lower() for x in existing_words_res}
                             
@@ -338,20 +344,20 @@ with tab_manage:
                                 if w.lower() in existing_set:
                                     duplicate_count += 1
                                 else:
-                                    # 根据用户选择赋予等级和标签
                                     is_cet4 = "CET4" in vocab_type
                                     target_level = 1 if is_cet4 else 0
                                     target_tag = "CET4" if is_cet4 else "TOEFL"
                                     
                                     insert_data.append({
                                         "word": w,
+                                        "meaning": item.get("meaning", ""),
                                         "phonetic": item.get("phonetic", ""),
                                         "example": item.get("example", ""),
                                         "language": db_lang_import,
                                         "level": target_level,
                                         "tag": target_tag
                                     })
-                                    existing_set.add(w.lower()) # 防止同一次提交里有重复
+                                    existing_set.add(w.lower())
                             
                             if insert_data:
                                 db.table("vocab").insert(insert_data).execute()
@@ -364,5 +370,21 @@ with tab_manage:
 
 # ==================== Tab 6: 计划与历史 ====================
 with tab_plan:
-    st.subheader("🗓️ 每日作战地图")
-    st.info("上午用手机偷偷刷 Tab 1。下午进 Tab 2 强迫造句。晚上回宿舍对练口语。")
+    st.subheader("🗓️ 一年期托福&N2 攻坚计划表")
+    
+    st.markdown("""
+    **☀️ 上午专业课（精力充沛：攻克英语）**
+    - *前20分钟*：打开看板 `Tab 1`，刷完今日托福 Level 0 和 Level 1 额度（无声心算打卡）。
+    - *后20分钟*：手机刷一篇 TPO 阅读，分析长难句。将长难句短语丢进 `Tab 4` 导入。
+
+    **☕ 下午专业课（容易犯困：切换日语）**
+    - *前20分钟*：打开看板 `Tab 2 (日语)`，玩动词变形 AI 挑战（极度清醒大脑）。
+    - *后20分钟*：阅读 NHK Easy News 或玩多邻国，保持语感。
+
+    **🚶‍♂️ 通勤/回宿舍（碎片听觉）**
+    - 戴单边耳机，使用【每日英语听力/日语听力】App 进行挖空回音跟读（单日英语，双日日语）。
+
+    **🌃 晚间宿舍（强迫输出）**
+    - 打开 ChatGPT 语音模式，与 AI 进行 5 分钟外语对练。
+    - 将 AI 纠错的地道表达粘贴进看板 `Tab 4 (口语召回库)`。睡觉前在 `Tab 3` 进行 3 秒闪卡测试。
+    """)
