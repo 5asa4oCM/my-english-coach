@@ -17,13 +17,29 @@ except ImportError:
 st.set_page_config(page_title="多语种自适应看板 (完美版)", page_icon="🌎", layout="wide")
 
 st.sidebar.title("⚙️ 云端系统设置")
-api_key = st.sidebar.text_input("AI API Key", type="password", value=st.session_state.get("api_key", ""))
-base_url = st.sidebar.text_input("AI Base URL", value="https://api.deepseek.com")
+
+# 安全尝试从云端保险箱 (Secrets) 中读取密码
+try:
+    default_api_key = st.secrets.get("DEEPSEEK_API_KEY", "")
+    default_supa_url = st.secrets.get("SUPABASE_URL", "")
+    default_supa_key = st.secrets.get("SUPABASE_KEY", "")
+except:
+    default_api_key = ""
+    default_supa_url = ""
+    default_supa_key = ""
+
+if default_api_key:
+    st.sidebar.caption("✅ 已成功连接云端保险箱，密钥已自动填入。")
+else:
+    st.sidebar.caption("⚠️ 未检测到云端保险箱，请手动填入密钥。")
+
+api_key = st.sidebar.text_input("AI API Key", type="password", value=st.session_state.get("api_key", default_api_key))
+base_url = st.sidebar.text_input("AI Base URL", value=st.session_state.get("base_url", "https://api.deepseek.com"))
 model_name = st.sidebar.selectbox("选择模型", ["deepseek-chat", "gpt-4o-mini", "gemini-1.5-flash"], index=0)
 
 st.sidebar.markdown("---")
-supa_url = st.sidebar.text_input("Supabase URL", value=st.session_state.get("supa_url", ""))
-supa_key = st.sidebar.text_input("Supabase Key", type="password", value=st.session_state.get("supa_key", ""))
+supa_url = st.sidebar.text_input("Supabase URL", value=st.session_state.get("supa_url", default_supa_url))
+supa_key = st.sidebar.text_input("Supabase Key", type="password", value=st.session_state.get("supa_key", default_supa_key))
 
 if api_key: st.session_state["api_key"] = api_key
 if base_url: st.session_state["base_url"] = base_url
@@ -136,7 +152,6 @@ with tab_learn:
                 else:
                     st.markdown(f"🗣️ **音标:** `{w1.get('phonetic', '无')}`")
                     
-                    # 优先显示库里保存的中文，如果没有再调用大模型
                     if w1.get('meaning'):
                         st.success(f"**核心含义：** {w1['meaning']}")
                     else:
@@ -225,29 +240,54 @@ with tab_l2:
                             for w in quiz['words']:
                                 new_w = min(float(w.get("weight", 1.0)) * 1.5, 10.0) if score_val <= 3 else max(float(w.get("weight", 1.0)) * 0.5, 0.1)
                                 db.table("vocab").update({"weight": new_w, "score": score_val}).eq("id", w["id"]).execute()
+                            
+                            db.table("history").insert({
+                                "date": f"L2挑战({db_lang_l2})",
+                                "zh_sentence": quiz['scenario'],
+                                "user_en": user_sentence,
+                                "feedback": re.sub(r'---.*\[SCORE:\s*[1-5]\]', '', feedback, flags=re.DOTALL)
+                            }).execute()
 
 # ==================== Tab 3: 口语召回 (3秒情景闪卡) ====================
 with tab_oral:
     st.subheader("🗣️ 3秒即兴口语闪卡测试")
+    st.caption("来源于你日常看剧、听播客、和AI对话积累的金句。")
     db = get_supabase_client()
     if db:
         oral_cards = db.table("oral_cards").select("*").execute().data
-        if st.button("🎲 生成随机口语场景", use_container_width=True, type="primary"):
-            if not oral_cards: st.warning("口语库为空，请先在 Tab 5 导入素材。")
-            else:
-                st.session_state.active_oral_card = random.choice(oral_cards)
-                st.session_state.show_oral_answer = False
-                st.rerun()
-                
+        
+        col_gen_card, col_clear_card = st.columns([2, 1])
+        with col_gen_card:
+            if st.button("🎲 生成随机口语场景", use_container_width=True, type="primary"):
+                if not oral_cards: st.warning("口语库为空，请先在 Tab 5 导入素材。")
+                else:
+                    st.session_state.active_oral_card = random.choice(oral_cards)
+                    st.session_state.show_oral_answer = False
+                    st.rerun()
+                    
         if st.session_state.active_oral_card:
+            st.markdown("---")
             c = st.session_state.active_oral_card
+            st.markdown("#### 🚨 场景线索（限时3秒，微声脱口而出）：")
             st.info(c["scenario"])
-            if st.button("👀 显示地道原句", use_container_width=True):
-                st.session_state.show_oral_answer = True
+            
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("👀 显示地道原句", use_container_width=True):
+                    st.session_state.show_oral_answer = True
+            with c2:
+                if st.button("⏭️ 下一个场景", use_container_width=True):
+                    st.session_state.active_oral_card = random.choice(oral_cards)
+                    st.session_state.show_oral_answer = False
+                    st.rerun()
+                    
             if st.session_state.show_oral_answer:
-                st.success(f"**语块：** `{c['phrase']}`\n\n**原句：** {c['full_sentence']}")
+                st.success(f"**核心语块：** `{c['phrase']}`\n\n**地道原句：** {c['full_sentence']}")
+                lang_code = 'ja' if any('\u3040' <= char <= '\u309F' or '\u30A0' <= char <= '\u30FF' for char in c['full_sentence']) else 'en'
+                audio = generate_audio(c['full_sentence'], lang=lang_code)
+                if audio: st.audio(audio, format="audio/mp3")
 
-# ==================== Tab 4: 词汇闪卡总览 (新增中文含义显示) ====================
+# ==================== Tab 4: 词汇闪卡总览 (查阅已导入单词) ====================
 with tab_cards:
     st.subheader("🗂️ 云端词库大阅兵")
     st.caption("在这里你可以查看 AI 自动抓取到的所有单词、中文含义、音标和原著例句。")
@@ -263,8 +303,7 @@ with tab_cards:
             
             for w in all_words[:50]:
                 with st.expander(f"🏷️ [{w.get('tag', '未知')}] {w['word']}  (Level {w['level']})"):
-                    # 新增显示中文意思
-                    st.write(f"**💡 含义:** `{w.get('meaning', '暂无（旧数据未记录，新导入即可包含）')}`")
+                    st.write(f"**💡 含义:** `{w.get('meaning', '暂无记录')}`")
                     st.write(f"**🗣️ 音标:** {w.get('phonetic', '无')}")
                     st.write(f"**📖 例句:** {w.get('example', '无例句')}")
                     st.write(f"**📈 抽中权重:** {w.get('weight', 1.0)}")
@@ -272,7 +311,7 @@ with tab_cards:
                         db.table("vocab").delete().eq("id", w["id"]).execute()
                         st.rerun()
 
-# ==================== Tab 5: 云端管理 (新增抓取中文含义) ====================
+# ==================== Tab 5: 云端管理 (精准去重与分类导入) ====================
 with tab_manage:
     st.subheader("📂 智能词汇分拣中心")
     
@@ -304,9 +343,9 @@ with tab_manage:
             else:
                 with st.spinner("AI 正在精准过滤废话，提取核心单词、中文意思、音标与例句..."):
                     try:
-                        # 提示词增加提取 meaning
                         prompt = f"""
                         你是一个严谨的语言学专家。请从以下文本中提取**正在被讲解的核心词汇**。
+                        绝对不要提取例句或中文解释里夹杂的其他英语单词！
                         返回 JSON 格式：
                         {{
                             "words": [
@@ -375,7 +414,7 @@ with tab_plan:
     st.markdown("""
     **☀️ 上午专业课（精力充沛：攻克英语）**
     - *前20分钟*：打开看板 `Tab 1`，刷完今日托福 Level 0 和 Level 1 额度（无声心算打卡）。
-    - *后20分钟*：手机刷一篇 TPO 阅读，分析长难句。将长难句短语丢进 `Tab 4` 导入。
+    - *后20分钟*：手机刷一篇 TPO 阅读，分析长难句。将长难句短语丢进 `Tab 5` 导入。
 
     **☕ 下午专业课（容易犯困：切换日语）**
     - *前20分钟*：打开看板 `Tab 2 (日语)`，玩动词变形 AI 挑战（极度清醒大脑）。
@@ -386,5 +425,15 @@ with tab_plan:
 
     **🌃 晚间宿舍（强迫输出）**
     - 打开 ChatGPT 语音模式，与 AI 进行 5 分钟外语对练。
-    - 将 AI 纠错的地道表达粘贴进看板 `Tab 4 (口语召回库)`。睡觉前在 `Tab 3` 进行 3 秒闪卡测试。
+    - 将 AI 纠错的地道表达粘贴进看板 `Tab 5 (导入至口语召回库)`。睡觉前在 `Tab 3` 进行 3 秒闪卡测试。
     """)
+    
+    st.markdown("---")
+    st.subheader("⏳ 云端学习足迹")
+    db = get_supabase_client()
+    if db:
+        hist = db.table("history").select("*").order("created_at", desc=True).limit(10).execute().data
+        for item in hist:
+            with st.expander(f"📌 {item.get('date', '')} | {item.get('zh_sentence', '')[:15]}..."):
+                st.markdown(f"**你的输出：** `{item.get('user_en', '')}`")
+                st.write(item.get('feedback', ''))
