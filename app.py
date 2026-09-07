@@ -185,6 +185,12 @@ with tab_learn:
                                 st.rerun()
                 else:
                     st.success("今日 L1 认读已清空！")
+                    # 新增功能：唤醒认读词汇
+                    if st.button("🔄 重置唤醒：继续认读冷却中的单词", key="wakeup_read", use_container_width=True):
+                        with st.spinner("正在将睡眠中的单词强行拉回队列..."):
+                            now_str = get_now_utc()
+                            db.table("vocab").update({"next_review_time": now_str}).eq("language", db_lang).eq("level", 1).gt("next_review_time", now_str).execute()
+                        st.rerun()
                     
             # --- L1 听写 ---
             with tab_l1_spell:
@@ -215,6 +221,12 @@ with tab_learn:
                         st.button("👉 点击进入下一个单词", use_container_width=True)
                 else:
                     st.success("今日 L1 听写已清空！")
+                    # 新增功能：唤醒听写词汇
+                    if st.button("🔄 重置唤醒：继续听写冷却中的单词", key="wakeup_spell", use_container_width=True):
+                        with st.spinner("正在将睡眠中的单词强行拉回队列..."):
+                            now_str = get_now_utc()
+                            db.table("vocab").update({"next_spell_time": now_str}).eq("language", db_lang).eq("level", 1).gt("next_spell_time", now_str).execute()
+                        st.rerun()
 
 # ==================== Tab 2: 强迫造句/变形 (Level 2) ====================
 with tab_l2:
@@ -240,6 +252,11 @@ with tab_l2:
         with tab_l2_sentence:
             if len(l2_sentence_words) < (3 if db_lang_l2 == "EN" else 2):
                 st.warning(f"当前到达复习时间的 L2 词汇太少。请先去 Tab 1 背词！")
+                if st.button("🔄 强行唤醒：召唤所有L2词汇进行造句", use_container_width=True):
+                    with st.spinner("唤醒中..."):
+                        now_str = get_now_utc()
+                        db.table("vocab").update({"next_l2_time": now_str}).eq("language", db_lang_l2).eq("level", 2).gt("next_l2_time", now_str).execute()
+                    st.rerun()
             else:
                 if st.button("🎲 抽取词汇，生成 AI 挑战", type="primary", use_container_width=True):
                     with st.spinner("AI 正在构思挑战..."):
@@ -312,6 +329,11 @@ with tab_l2:
                     st.button("👉 点击进入下一个单词", use_container_width=True)
             else:
                 st.success("今日 L2 听写已清空！")
+                if st.button("🔄 重置唤醒：继续听写冷却中的高阶单词", key="wakeup_spell_l2", use_container_width=True):
+                    with st.spinner("正在将睡眠中的单词强行拉回队列..."):
+                        now_str = get_now_utc()
+                        db.table("vocab").update({"next_spell_time": now_str}).eq("language", db_lang_l2).eq("level", 2).gt("next_spell_time", now_str).execute()
+                    st.rerun()
 
 # ==================== Tab 3: 口语召回 ====================
 with tab_oral:
@@ -319,20 +341,35 @@ with tab_oral:
     db = get_supabase_client()
     if db:
         oral_cards = db.table("oral_cards").select("*").execute().data
-        if st.button("🎲 生成随机口语场景", use_container_width=True, type="primary"):
-            if not oral_cards: st.warning("口语库为空，请先在 Tab 5 导入素材。")
-            else:
-                st.session_state.active_oral_card = random.choice(oral_cards)
-                st.session_state.show_oral_answer = False
-                st.rerun()
-                
+        col_gen_card, col_clear_card = st.columns([2, 1])
+        with col_gen_card:
+            if st.button("🎲 生成随机口语场景", use_container_width=True, type="primary"):
+                if not oral_cards: st.warning("口语库为空，请先在 Tab 5 导入素材。")
+                else:
+                    st.session_state.active_oral_card = random.choice(oral_cards)
+                    st.session_state.show_oral_answer = False
+                    st.rerun()
+                    
         if st.session_state.active_oral_card:
+            st.markdown("---")
             c = st.session_state.active_oral_card
             st.info(c["scenario"])
-            if st.button("👀 显示地道原句", use_container_width=True):
-                st.session_state.show_oral_answer = True
+            
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("👀 显示地道原句", use_container_width=True):
+                    st.session_state.show_oral_answer = True
+            with c2:
+                if st.button("⏭️ 下一个场景", use_container_width=True):
+                    st.session_state.active_oral_card = random.choice(oral_cards)
+                    st.session_state.show_oral_answer = False
+                    st.rerun()
+                    
             if st.session_state.show_oral_answer:
-                st.success(f"**语块：** `{c['phrase']}`\n\n**原句：** {c['full_sentence']}")
+                st.success(f"**核心语块：** `{c['phrase']}`\n\n**地道原句：** {c['full_sentence']}")
+                lang_code = 'ja' if any('\u3040' <= char <= '\u309F' or '\u30A0' <= char <= '\u30FF' for char in c['full_sentence']) else 'en'
+                audio = generate_audio(c['full_sentence'], lang=lang_code)
+                if audio: st.audio(audio, format="audio/mp3")
 
 # ==================== Tab 4: 词汇闪卡总览 ====================
 with tab_cards:
@@ -353,7 +390,7 @@ with tab_cards:
                         db.table("vocab").delete().eq("id", w["id"]).execute()
                         st.rerun()
 
-# ==================== Tab 5: 云端管理 (新增数据急救站) ====================
+# ==================== Tab 5: 云端管理 (精准去重与修复) ====================
 with tab_manage:
     st.subheader("📂 智能词汇分拣中心")
     vocab_type = st.radio("你要导入的生词属于什么级别？", ["CET4 四级词汇 (直达 L1)", "TOEFL 托福词汇 (进入 L0)"], horizontal=True)
@@ -415,6 +452,7 @@ with tab_manage:
                             
                             insert_data = []
                             duplicate_count = 0
+                            now_str = get_now_utc()
                             
                             for item in extracted_items:
                                 w = item.get("word", "").strip()
@@ -427,7 +465,6 @@ with tab_manage:
                                     target_level = 1 if is_cet4 else 0
                                     target_tag = "CET4" if is_cet4 else "TOEFL"
                                     
-                                    # 核心：导入时立刻初始化艾宾浩斯时间轴！
                                     insert_data.append({
                                         "word": w,
                                         "meaning": item.get("meaning", ""),
@@ -436,9 +473,9 @@ with tab_manage:
                                         "language": db_lang_import,
                                         "level": target_level,
                                         "tag": target_tag,
-                                        "next_review_time": get_now_utc(),
-                                        "next_spell_time": get_now_utc(),
-                                        "next_l2_time": get_now_utc()
+                                        "next_review_time": now_str,
+                                        "next_spell_time": now_str,
+                                        "next_l2_time": now_str
                                     })
                                     existing_set.add(w.lower())
                             
@@ -450,12 +487,38 @@ with tab_manage:
                     except Exception as e:
                         st.error(f"处理失败: {e}")
 
+        # ----- 数据急救站 -----
+        st.markdown("---")
+        st.markdown("##### 🏥 旧数据 AI 修复台")
+        if st.button("⚙️ 一键自动修复旧单词的缺失字段"):
+            with st.spinner("AI 正在扫描并修复你的云端数据库，请勿关闭页面..."):
+                all_v = db.table("vocab").select("*").execute().data
+                to_fix = [w for w in all_v if not w.get("meaning") or not w.get("phonetic")]
+                if not to_fix:
+                    st.success("太棒了！你的数据库非常健康，所有单词都有中文意思和音标，不需要修复。")
+                else:
+                    st.write(f"检测到 {len(to_fix)} 个不完整的旧单词，开始修复...")
+                    success_cnt = 0
+                    for bw in to_fix:
+                        try:
+                            fix_prompt = f"请输出 '{bw['word']}' 的极简中文意思和音标。格式必须严格为 JSON: {{\"meaning\": \"意思\", \"phonetic\": \"音标\"}}"
+                            f_resp = llm.chat.completions.create(model=st.session_state["model_name"], messages=[{"role": "user", "content": fix_prompt}], response_format={"type": "json_object"})
+                            f_res = json.loads(f_resp.choices[0].message.content)
+                            db.table("vocab").update({
+                                "meaning": f_res.get("meaning", ""),
+                                "phonetic": f_res.get("phonetic", "")
+                            }).eq("id", bw["id"]).execute()
+                            success_cnt += 1
+                        except:
+                            pass
+                    st.success(f"✅ 修复完成！成功为 {success_cnt} 个老单词补全了中文释义和音标！")
+
 # ==================== Tab 6: 计划与历史 ====================
 with tab_plan:
     st.subheader("🗓️ 一年期托福&N2 攻坚计划表")
     st.markdown("""
     **☀️ 上午专业课（精力充沛：攻克英语）**
-    - *前20分钟*：打开看板 `Tab 1`，刷完今日待复习额度。灵活切换【认读】与【听写】。
+    - *前20分钟*：打开看板 `Tab 1`，刷完今日待复习额度。可灵活切换【认读】与【听写】。
     - *后20分钟*：手机刷一篇 TPO 阅读，分析长难句。将长难句短语丢进 `Tab 5` 导入。
 
     **☕ 下午专业课（容易犯困：切换日语）**
