@@ -93,6 +93,7 @@ if "current_l2_spell" not in st.session_state: st.session_state.current_l2_spell
 if "active_oral_card" not in st.session_state: st.session_state.active_oral_card = None
 if "show_oral_answer" not in st.session_state: st.session_state.show_oral_answer = False
 if "chunk_quiz" not in st.session_state: st.session_state.chunk_quiz = None
+if "current_prompt_chunk" not in st.session_state: st.session_state.current_prompt_chunk = None
 
 tab_prompt, tab_learn, tab_l2, tab_chunks, tab_oral, tab_cards, tab_manage, tab_history_plan = st.tabs([
     "🤖 语伴Prompt", "📚 词汇漏斗", "🎯 L2实战", "🧩 语块训练", "🗣️ 口语闪卡", "🗂️ 数据总览", "📂 云端管理", "🗓️ 历史&计划"
@@ -110,7 +111,17 @@ with tab_prompt:
             due_chunks = db.table("chunks").select("*").eq("language", "EN").execute().data
         
         if due_chunks:
-            target_chunk = random.choice(due_chunks)
+            # 刷新按钮：点击后从库中重新随机抽取一个
+            if st.button("🔄 刷新换一个语块", type="secondary"):
+                st.session_state.current_prompt_chunk = random.choice(due_chunks)
+                st.rerun()
+
+            # 保持当前抽取的语块不变，防止切换其他页面时乱跳
+            if not st.session_state.current_prompt_chunk:
+                st.session_state.current_prompt_chunk = random.choice(due_chunks)
+                
+            target_chunk = st.session_state.current_prompt_chunk
+            
             st.info(f"💡 **今日口语核心骨架**：`{target_chunk['phrase']}` ({target_chunk['meaning']})")
             
             prompt_text = f"""从现在开始，你是我严厉的口语肌肉记忆教练（Pattern Drill Sergeant）。
@@ -125,7 +136,7 @@ with tab_prompt:
             
             st.code(prompt_text, language="markdown")
         else:
-            st.warning("语块库里还没有英语数据，快去 Tab 6 导入吧！")
+            st.warning("语块库里还没有英语数据哦，快去 Tab 6 导入吧！")
 
 # ==================== Tab 1: 词汇漏斗 ====================
 with tab_learn:
@@ -134,7 +145,9 @@ with tab_learn:
     db_lang = "EN" if "EN" in lang_choice else "JP"
     
     db = get_supabase_client()
-    if db:
+    if not db:
+        st.warning("请在左侧配置数据库连接。")
+    else:
         now_utc = get_now_utc()
         l0_words = db.table("vocab").select("*").eq("language", db_lang).eq("level", 0).execute().data
         l1_read_words = db.table("vocab").select("*").eq("language", db_lang).eq("level", 1).lte("next_review_time", now_utc).execute().data
@@ -276,7 +289,8 @@ with tab_l2:
                     selected = l2_sentence_words[:k]
                     word_list = [x['word'] for x in selected]
                     
-                    prompt = f"基于英语单词：{word_list}。用中文设定一个日常或学术场景，字数50以内。" if db_lang_l2 == "EN" else f"基于日语词汇：{word_list}。出一个造句或动词变形的中文情景挑战。"
+                    prompt = f"基于英语单词：{word_list}。用中文设定一个日常或学术场景。要求：合理串联这三个词，只要中文描述，字数50以内。" if db_lang_l2 == "EN" else f"基于日语词汇：{word_list}。出一个造句或动词变形的中文情景挑战，只输出中文要求。"
+                    
                     resp = llm.chat.completions.create(model=st.session_state["model_name"], messages=[{"role": "user", "content": prompt}])
                     st.session_state.l2_quiz = {"words": selected, "scenario": resp.choices[0].message.content.strip(), "lang": db_lang_l2}
                     
@@ -288,12 +302,12 @@ with tab_l2:
                 st.markdown(f"**目标词汇**：`{'` | `'.join(target_words)}`")
                 
                 quiz_id = "_".join([str(x["id"]) for x in quiz["words"]])
-                user_sentence = st.text_area("✍️ 你的外语作答：", key=f"l2_ans_{quiz_id}")
+                user_sentence = st.text_area("✍️ 你的外语作答 (脑内构思后敲出来)：", key=f"l2_ans_{quiz_id}")
                 
                 if st.button("🚀 提交给 AI 批改", use_container_width=True):
                     if not user_sentence.strip(): st.warning("请输入句子。")
                     else:
-                        eval_prompt = f"场景：{quiz['scenario']}\n要求用词：{target_words}\n用户：{user_sentence}\n请输出:\n### 1. 诊断纠错\n### 2. 双版本重塑\n### 3. [SCORE: X] (1-5分)"
+                        eval_prompt = f"场景：{quiz['scenario']}\n要求用词：{target_words}\n用户：{user_sentence}\n请输出:\n### 1. 诊断纠错\n### 2. 双版本重塑(日常/学术)\n### 3. [SCORE: X] (1-5分)"
                         with st.spinner("阅卷中..."):
                             feedback = ""
                             stream = llm.chat.completions.create(model=st.session_state["model_name"], messages=[{"role": "user", "content": eval_prompt}], stream=True)
@@ -594,7 +608,7 @@ with tab_manage:
                                     
                             if insert_data:
                                 db.table("chunks").insert(insert_data).execute()
-                                st.success(f"🎉 成功提取并写入 {len(insert_data)} 个语块！(拦截了 {duplicate_count} 个重复项)")
+                                st.success(f"🎉 成功提取并写入 {len(insert_data)} 个语块至 Chunks 训练营！(拦截了 {duplicate_count} 个重复项)")
                             else:
                                 st.warning(f"导入拦截：本次提取的语块全部已存在！(拦截了 {duplicate_count} 个)")
                                 
